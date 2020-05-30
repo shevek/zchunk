@@ -1,78 +1,26 @@
-#!/usr/bin/python3
-"""Compile a test program."""
+"""Common routines for the Python zchunk tests."""
 
 import argparse
 import dataclasses
 import os
 import pathlib
-import re
 import subprocess
 import sys
-import tempfile
 
 from typing import Callable, Dict, List
 
-
-MAGIC = bytes([0, ord("Z"), ord("C"), ord("K"), ord("1")])
-
-RE_DATA_SIZE = re.compile(
-    r""" ^
-    Data \s+ size \s* : \s*
-    (?P<size> 0 | [1-9][0-9]* )
-    \s*
-    $ """,
-    re.X,
-)
-
-RE_CHUNK_COUNT = re.compile(
-    r""" ^
-    Chunk \s+ count \s* : \s*
-    (?P<count> 0 | [1-9][0-9]* )
-    \s*
-    $ """,
-    re.X,
-)
-
-RE_CHUNKS = re.compile(
-    r""" ^
-    \s+
-    Chunk \s+
-    Checksum \s+
-    Start \s+
-    Comp \s size \s+
-    Size \s*
-    $ """,
-    re.X,
-)
-
-RE_CHUNK = re.compile(
-    r""" ^
-    \s+
-    (?P<idx> 0 | [1-9][0-9]* ) \s+
-    (?P<cksum> \S+ ) \s+
-    (?P<start> 0 | [1-9][0-9]* ) \s+
-    (?P<comp_size> 0 | [1-9][0-9]* ) \s+
-    (?P<size> 0 | [1-9][0-9]* ) \s*
-    $ """,
-    re.X,
-)
+from pychunk import defs
 
 
 @dataclasses.dataclass(frozen=True)
 class Config:
-    """Runtime configuration."""
+    """Common runtime configuration settings."""
 
-    # pylint: disable=too-many-instance-attributes
-
-    tempd: pathlib.Path
-    source: pathlib.Path
-    obj: pathlib.Path
-    program: pathlib.Path
+    bindir: pathlib.Path
     env: Dict[str, str]
 
     orig: pathlib.Path
     compressed: pathlib.Path
-    uncompressed: pathlib.Path
 
 
 @dataclasses.dataclass(frozen=True)
@@ -95,73 +43,25 @@ def get_runenv() -> Dict[str, str]:
     return env
 
 
-def parse_args(dirname: str) -> Config:
-    """Parse the command-line arguments, deduce some things."""
-    parser = argparse.ArgumentParser(prog="dictionary")
+def base_parser(prog: str) -> argparse.ArgumentParser:
+    """Create a parser with the common options."""
+    parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument(
-        "source", type=str, help="path to the test program source file",
+        "-d",
+        "--bindir",
+        type=str,
+        required=True,
+        help="path to the directory containing the zchunk tools",
     )
     parser.add_argument(
-        "filename", type=str, help="path to the filename to compress"
+        "-f",
+        "--filename",
+        type=str,
+        required=True,
+        help="path to the filename to compress",
     )
 
-    args = parser.parse_args()
-
-    tempd = pathlib.Path(dirname).absolute()
-    return Config(
-        tempd=tempd,
-        source=pathlib.Path(args.source),
-        obj=tempd / "chunk.o",
-        program=tempd / "chunk",
-        env=get_runenv(),
-        orig=pathlib.Path(args.filename).absolute(),
-        compressed=tempd / "words.txt.zck",
-        uncompressed=tempd / "chunk.txt",
-    )
-
-
-def do_compile(cfg: Config) -> None:
-    """Compile the test program."""
-    print("Fetching the C compiler flags for zck")
-    cflags = (
-        subprocess.check_output(
-            ["pkg-config", "--cflags", "zck"], shell=False, env=cfg.env
-        )
-        .decode("UTF-8")
-        .rstrip("\r\n")
-    )
-    if "\r" in cflags or "\n" in cflags:
-        sys.exit(f"`pkg-config --cflags zck` returned {cflags!r}")
-
-    if cfg.obj.exists():
-        sys.exit(f"Did not expect {cfg.obj} to exist")
-    cmd = f"cc -c -o '{cfg.obj}' {cflags} '{cfg.source}'"
-    print(f"Running {cmd!r}")
-    subprocess.check_call(cmd, shell=True, env=cfg.env)
-    if not cfg.obj.is_file():
-        sys.exit(f"{cmd!r} did not create the {cfg.obj} file")
-
-    print("Fetching the C linker flags and libraries for zck")
-    libs = (
-        subprocess.check_output(
-            ["pkg-config", "--libs", "zck"], shell=False, env=cfg.env
-        )
-        .decode("UTF-8")
-        .rstrip("\r\n")
-    )
-    if "\r" in libs or "\n" in libs:
-        sys.exit(f"`pkg-config --libs zck` returned {libs!r}")
-
-    if cfg.program.exists():
-        sys.exit(f"Did not expect {cfg.program} to exist")
-    cmd = f"cc -o '{cfg.program}' '{cfg.obj}' {libs}"
-    print(f"Running {cmd!r}")
-    subprocess.check_call(cmd, shell=True, env=cfg.env)
-    if not cfg.program.is_file():
-        sys.exit(f"{cmd!r} did not create the {cfg.program} file")
-    if not os.access(cfg.program, os.X_OK):
-        sys.exit(f"Not an executable file: {cfg.program}")
-    print(f"Looks like we got {cfg.program}")
+    return parser
 
 
 def do_compress(cfg: Config, orig_size: int) -> int:
@@ -170,7 +70,7 @@ def do_compress(cfg: Config, orig_size: int) -> int:
     if cfg.compressed.exists():
         sys.exit(f"Did not expect {cfg.compressed} to exist")
     subprocess.check_call(
-        ["zck", "-o", cfg.compressed, "--", cfg.orig],
+        [cfg.bindir / "zck", "-o", cfg.compressed, "--", cfg.orig],
         shell=False,
         env=cfg.env,
     )
@@ -185,8 +85,10 @@ def do_compress(cfg: Config, orig_size: int) -> int:
         )
     start = cfg.compressed.open(mode="rb").read(5)
     print(f"{cfg.compressed} starts with {start!r}")
-    if start != MAGIC:
-        sys.exit(f"{cfg.compressed} does not start with {MAGIC!r}: {start!r}")
+    if start != defs.MAGIC:
+        sys.exit(
+            f"{cfg.compressed} does not start with {defs.MAGIC!r}: {start!r}"
+        )
 
     return comp_size
 
@@ -195,7 +97,7 @@ def read_chunks(cfg: Config, orig_size: int, comp_size: int) -> Chunk:
     """Parse the chunks of the compressed file."""
     # pylint: disable=too-many-statements
     output = subprocess.check_output(
-        ["zck_read_header", "-c", "--", cfg.compressed],
+        [cfg.bindir / "zck_read_header", "-c", "--", cfg.compressed],
         shell=False,
         env=cfg.env,
     ).decode("UTF-8")
@@ -210,7 +112,7 @@ def read_chunks(cfg: Config, orig_size: int, comp_size: int) -> Chunk:
     def parse_chunk(line: str) -> str:
         """Parse a single chunk line."""
         # pylint: disable=too-many-branches
-        data = RE_CHUNK.match(line)
+        data = defs.RE_CHUNK.match(line)
         if not data:
             sys.exit(f"Unexpected line for chunk {len(chunks)}: {line!r}")
         idx = int(data.group("idx"))
@@ -277,14 +179,14 @@ def read_chunks(cfg: Config, orig_size: int, comp_size: int) -> Chunk:
 
     def wait_for_chunks(line: str) -> str:
         """Wait for the 'Chunks:' line."""
-        if not RE_CHUNKS.match(line):
+        if not defs.RE_CHUNKS.match(line):
             return "wait_for_chunks"
 
         return "parse_chunk"
 
     def wait_for_chunk_count(line: str) -> str:
         """Wait for the 'chunk count' line."""
-        data = RE_CHUNK_COUNT.match(line)
+        data = defs.RE_CHUNK_COUNT.match(line)
         if not data:
             return "wait_for_chunk_count"
         print(f"- got a chunk count: {data.groupdict()!r}")
@@ -298,7 +200,7 @@ def read_chunks(cfg: Config, orig_size: int, comp_size: int) -> Chunk:
 
     def wait_for_total_size(line: str) -> str:
         """Wait for the 'data size' line."""
-        data = RE_DATA_SIZE.match(line)
+        data = defs.RE_DATA_SIZE.match(line)
         if not data:
             return "wait_for_total_size"
         print(f"- got a size line: {data.groupdict()!r}")
@@ -336,56 +238,3 @@ def read_chunks(cfg: Config, orig_size: int, comp_size: int) -> Chunk:
 
     # Now let's find the second chunk
     return next(chunk for chunk in chunks if chunk.start > 0)
-
-
-def run_program(cfg: Config) -> None:
-    """Run the test program, hopefully generate the chunk file."""
-    print(f"About to run {cfg.program}")
-    if cfg.uncompressed.exists():
-        sys.exit(f"Did not expect {cfg.uncompressed} to exist")
-    subprocess.check_call(
-        [cfg.program, cfg.compressed, cfg.uncompressed],
-        shell=False,
-        env=cfg.env,
-    )
-    if not cfg.uncompressed.is_file():
-        sys.exit(f"{cfg.program} did not create the {cfg.uncompressed} file")
-
-
-def compare_chunk(cfg: Config, second: Chunk, orig_size: int) -> None:
-    """Read data from the input file and the chunk."""
-    # OK, let's load it all into memory, mmkay?
-    contents = cfg.orig.read_bytes()
-    if len(contents) != orig_size:
-        sys.exit(
-            f"Could not read {orig_size} bytes from {cfg.orig}, "
-            f"read {len(contents)}"
-        )
-    chunk = cfg.uncompressed.read_bytes()
-    if len(chunk) != second.size:
-        sys.exit(
-            f"Could not read {second.size} bytes from {cfg.uncompressed}, "
-            f"read {len(chunk)}"
-        )
-
-    if contents[second.start : second.start + second.size] != chunk:
-        sys.exit("Mismatch!")
-
-
-def main() -> None:
-    """Parse arguments, compile a program, compress a file, test it."""
-    with tempfile.TemporaryDirectory() as dirname:
-        print(f"Using temporary directory {dirname}")
-        cfg = parse_args(dirname)
-        do_compile(cfg)
-        orig_size = cfg.orig.stat().st_size
-        print(f"Original file size: {orig_size}")
-        comp_size = do_compress(cfg, orig_size)
-        second_chunk = read_chunks(cfg, orig_size, comp_size)
-        run_program(cfg)
-        compare_chunk(cfg, second_chunk, orig_size)
-        print("Seems fine!")
-
-
-if __name__ == "__main__":
-    main()

@@ -1,3 +1,7 @@
 Test-Command: debian/tests/dictionary /usr/bin /usr/share/dict/american-english
 Depends: @, python3, wamerican
 Features: test-name=debian-dict
+
+Test-Command: debian/tests/compile debian/tests/chunk.c /usr/share/dict/american-english
+Depends: @, build-essential, pkg-config, python3, wamerican
+Features: test-name=debian-compile

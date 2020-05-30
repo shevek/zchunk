@@ -52,7 +52,7 @@ Package: libzck-dev
 Section: libdevel
 Architecture: any
 Multi-Arch: same
-Depends: ${misc:Depends}, libzck1 (= ${binary:Version})
+Depends: ${misc:Depends}, libzck1 (= ${binary:Version}), libzstd-dev
 Description: compress a file into independent chunks - development files
  zchunk is a compressed file format that splits the file into independent
  chunks. This allows one to only download changed chunks when

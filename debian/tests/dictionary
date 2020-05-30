@@ -1,0 +1,352 @@
+#!/usr/bin/python3
+"""A very simple test for the command-line zchunk tools."""
+
+import argparse
+import dataclasses
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+from typing import Callable, Dict, List, Tuple
+
+
+MAGIC = bytes([0, ord("Z"), ord("C"), ord("K"), ord("1")])
+
+RE_DATA_SIZE = re.compile(
+    r""" ^
+    Data \s+ size \s* : \s*
+    (?P<size> 0 | [1-9][0-9]* )
+    \s*
+    $ """,
+    re.X,
+)
+
+RE_CHUNK_COUNT = re.compile(
+    r""" ^
+    Chunk \s+ count \s* : \s*
+    (?P<count> 0 | [1-9][0-9]* )
+    \s*
+    $ """,
+    re.X,
+)
+
+RE_CHUNKS = re.compile(
+    r""" ^
+    \s+
+    Chunk \s+
+    Checksum \s+
+    Start \s+
+    Comp \s size \s+
+    Size \s*
+    $ """,
+    re.X,
+)
+
+RE_CHUNK = re.compile(
+    r""" ^
+    \s+
+    (?P<idx> 0 | [1-9][0-9]* ) \s+
+    (?P<cksum> \S+ ) \s+
+    (?P<start> 0 | [1-9][0-9]* ) \s+
+    (?P<comp_size> 0 | [1-9][0-9]* ) \s+
+    (?P<size> 0 | [1-9][0-9]* ) \s*
+    $ """,
+    re.X,
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class Config:
+    """Runtime configuration."""
+
+    tempd: pathlib.Path
+    bindir: pathlib.Path
+    env: Dict[str, str]
+
+    orig: pathlib.Path
+    compressed: pathlib.Path
+    uncompressed: pathlib.Path
+    recompressed: pathlib.Path
+
+
+def get_runenv() -> Dict[str, str]:
+    """Set up the environment for running the zchunk programs."""
+    env = dict(os.environ)
+    env["LC_ALL"] = "C.UTF-8"
+    env["LANGUAGE"] = ""
+    return env
+
+
+def parse_args(dirname: str) -> Config:
+    """Parse the command-line arguments, deduce some things."""
+    parser = argparse.ArgumentParser(prog="dictionary")
+    parser.add_argument(
+        "bindir",
+        type=str,
+        help="path to the directory containing the zchunk binaries",
+    )
+    parser.add_argument(
+        "filename", type=str, help="path to the filename to compress"
+    )
+
+    args = parser.parse_args()
+    bindir = pathlib.Path(args.bindir).absolute()
+    if not bindir.is_dir():
+        sys.exit(f"Not a directory: {bindir}")
+    zck = bindir / "zck"
+    if not zck.is_file() or not os.access(zck, os.X_OK):
+        sys.exit(f"Not an executable file: {zck}")
+
+    tempd = pathlib.Path(dirname).absolute()
+    return Config(
+        tempd=tempd,
+        bindir=bindir,
+        env=get_runenv(),
+        orig=pathlib.Path(args.filename).absolute(),
+        compressed=tempd / "words.txt.zck",
+        uncompressed=tempd / "un/words.txt",
+        recompressed=tempd / "re/words.txt.zck",
+    )
+
+
+def do_compress(cfg: Config, orig_size: int) -> int:
+    """Compress the original file."""
+    print(f"About to compress {cfg.orig} to {cfg.compressed}")
+    if cfg.compressed.exists():
+        sys.exit(f"Did not expect {cfg.compressed} to exist")
+    subprocess.check_call(
+        [cfg.bindir / "zck", "-o", cfg.compressed, "--", cfg.orig],
+        shell=False,
+        env=cfg.env,
+    )
+    if not cfg.compressed.is_file():
+        sys.exit(f"zck did not create the {cfg.compressed} file")
+    comp_size = cfg.compressed.stat().st_size
+    print(f"{cfg.compressed} size is {comp_size} bytes long")
+    if comp_size >= orig_size:
+        sys.exit(
+            f"sizeof({cfg.compressed}) == {comp_size} : "
+            f"sizeof({cfg.orig}) == {orig_size}"
+        )
+    start = cfg.compressed.open(mode="rb").read(5)
+    print(f"{cfg.compressed} starts with {start!r}")
+    if start != MAGIC:
+        sys.exit(f"{cfg.compressed} does not start with {MAGIC!r}: {start!r}")
+
+    return comp_size
+
+
+def read_chunks(cfg: Config, orig_size: int, comp_size: int) -> None:
+    """Parse the chunks of the compressed file."""
+    # pylint: disable=too-many-statements
+    output = subprocess.check_output(
+        [cfg.bindir / "zck_read_header", "-c", "--", cfg.compressed],
+        shell=False,
+        env=cfg.env,
+    ).decode("UTF-8")
+
+    params: Dict[str, int] = {}
+    chunks: List[Tuple[int, int, int, int, int]] = []
+
+    def ignore_till_end(line: str) -> str:
+        """Ignore anything until EOF."""
+        raise NotImplementedError(line)
+
+    def parse_chunk(line: str) -> str:
+        """Parse a single chunk line."""
+        # pylint: disable=too-many-branches
+        data = RE_CHUNK.match(line)
+        if not data:
+            sys.exit(f"Unexpected line for chunk {len(chunks)}: {line!r}")
+        idx = int(data.group("idx"))
+        start = int(data.group("start"))
+        csize = int(data.group("comp_size"))
+        size = int(data.group("size"))
+
+        if idx != len(chunks):
+            sys.exit(f"Expected index {len(chunks)}: {line!r}")
+        if chunks:
+            last_chunk = chunks[-1]
+            if start != last_chunk[3]:
+                sys.exit(f"Expected start {last_chunk[3]}: {line!r}")
+        else:
+            if start != params["size_diff"]:
+                sys.exit(f"Expected start {params['size_diff']}: {line!r}")
+            last_chunk = (0, 0, 0, params["size_diff"], 0)
+
+        next_chunk = (
+            start,
+            csize,
+            size,
+            last_chunk[3] + csize,
+            last_chunk[4] + size,
+        )
+        if next_chunk[3] > comp_size:
+            sys.exit(
+                f"Compressed size overflow: {next_chunk[3]} > {comp_size}"
+            )
+
+        more = idx + 1 != params["chunk_count"]
+        if more:
+            if next_chunk[4] >= orig_size:
+                sys.exit(
+                    f"Original size overflow: {next_chunk[4]} >= {orig_size}"
+                )
+        else:
+            if next_chunk[3] != comp_size:
+                sys.exit(
+                    f"Compressed size mismatch: {next_chunk[3]} != {comp_size}"
+                )
+            if next_chunk[4] != orig_size:
+                sys.exit(
+                    f"Original size mismatch: {next_chunk[4]} != {orig_size}"
+                )
+
+        print(f"- appending {next_chunk!r}")
+        chunks.append(next_chunk)
+
+        if more:
+            return "parse_chunk"
+        return "ignore_till_end"
+
+    def wait_for_chunks(line: str) -> str:
+        """Wait for the 'Chunks:' line."""
+        if not RE_CHUNKS.match(line):
+            return "wait_for_chunks"
+
+        return "parse_chunk"
+
+    def wait_for_chunk_count(line: str) -> str:
+        """Wait for the 'chunk count' line."""
+        data = RE_CHUNK_COUNT.match(line)
+        if not data:
+            return "wait_for_chunk_count"
+        print(f"- got a chunk count: {data.groupdict()!r}")
+
+        count = int(data.group("count"))
+        if count < 1:
+            sys.exit(f"zck_read_header said chunk count {count}")
+        params["chunk_count"] = count
+
+        return "wait_for_chunks"
+
+    def wait_for_total_size(line: str) -> str:
+        """Wait for the 'data size' line."""
+        data = RE_DATA_SIZE.match(line)
+        if not data:
+            return "wait_for_total_size"
+        print(f"- got a size line: {data.groupdict()!r}")
+
+        size = int(data.group("size"))
+        if size < 1 or size > comp_size:
+            sys.exit(
+                f"zck_read_header said data size {size} (comp {comp_size})"
+            )
+        params["size_diff"] = comp_size - size
+
+        return "wait_for_chunk_count"
+
+    handlers: Dict[str, Callable[[str], str]] = {
+        func.__name__: func
+        for func in (
+            wait_for_total_size,
+            wait_for_chunk_count,
+            wait_for_chunks,
+            parse_chunk,
+            ignore_till_end,
+        )
+    }
+
+    handler: Callable[[str], str] = wait_for_total_size
+
+    for line in output.splitlines():
+        print(f"- read a line: {line}")
+        new_handler = handler(line)
+        assert new_handler in handlers, new_handler
+        handler = handlers[new_handler]
+
+    if handler != ignore_till_end:  # pylint: disable=comparison-with-callable
+        sys.exit(f"handler is {handler!r} instead of {ignore_till_end!r}")
+
+
+def do_uncompress(cfg: Config, orig_size: int) -> None:
+    """Uncompress and compare."""
+    # OK, so unzck's behavior is... weird.
+    cfg.uncompressed.parent.mkdir(mode=0o755)
+
+    print(f"Extracting {cfg.compressed} to {cfg.uncompressed}")
+    if cfg.uncompressed.exists():
+        sys.exit(f"Did not expect {cfg.uncompressed} to exist")
+    subprocess.check_call(
+        [cfg.bindir / "unzck", "--", cfg.compressed],
+        shell=False,
+        env=cfg.env,
+        cwd=cfg.uncompressed.parent,
+    )
+    if not cfg.uncompressed.is_file():
+        subprocess.check_call(["ls", "-lt", "--", cfg.tempd], shell=False)
+        sys.exit(f"unzck did not create the {cfg.uncompressed} file")
+
+    new_size = cfg.uncompressed.stat().st_size
+    print(f"Uncompressed size {new_size}")
+    if new_size != orig_size:
+        sys.exit(f"Uncompressed size {new_size} != original size {orig_size}")
+
+    print(f"Comparing {cfg.orig} to {cfg.uncompressed}")
+    subprocess.check_call(
+        ["cmp", "--", cfg.orig, cfg.uncompressed], shell=False, env=cfg.env
+    )
+
+
+def do_recompress(cfg: Config, comp_size: int) -> None:
+    """Recompress the file and compare."""
+    # OK, so zck's behavior is also weird...
+    cfg.recompressed.parent.mkdir(mode=0o755)
+
+    print(f"Recompressing {cfg.uncompressed} to {cfg.recompressed}")
+    if cfg.recompressed.exists():
+        sys.exit(f"Did not expect {cfg.recompressed} to exist")
+    subprocess.check_call(
+        [cfg.bindir / "zck", "--", cfg.uncompressed],
+        shell=False,
+        env=cfg.env,
+        cwd=cfg.recompressed.parent,
+    )
+    if not cfg.recompressed.is_file():
+        sys.exit(f"zck did not create the {cfg.recompressed} file")
+
+    new_size = cfg.recompressed.stat().st_size
+    print(f"Recompressed size {new_size}")
+    if new_size != comp_size:
+        sys.exit(
+            f"Recompressed size {new_size} != compressed size {comp_size}"
+        )
+
+    print(f"Comparing {cfg.compressed} to {cfg.recompressed}")
+    subprocess.check_call(
+        ["cmp", "--", cfg.compressed, cfg.recompressed],
+        shell=False,
+        env=cfg.env,
+    )
+
+
+def main() -> None:
+    """Create a temporary directory, compress a file, analyze it."""
+    with tempfile.TemporaryDirectory() as dirname:
+        print(f"Using temporary directory {dirname}")
+        cfg = parse_args(dirname)
+        orig_size = cfg.orig.stat().st_size
+        print(f"{cfg.orig} is {orig_size} bytes long")
+
+        comp_size = do_compress(cfg, orig_size)
+        read_chunks(cfg, orig_size, comp_size)
+        do_uncompress(cfg, orig_size)
+        do_recompress(cfg, comp_size)
+        print("Seems fine!")
+
+
+if __name__ == "__main__":
+    main()

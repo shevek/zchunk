@@ -1,0 +1,3 @@
+usr/include
+usr/lib/*/libzck.so
+usr/lib/*/pkgconfig/zck.pc

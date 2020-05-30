@@ -1,0 +1,5 @@
+zchunk (1.1.6+ds1-1) UNRELEASED; urgency=low
+
+  * Initial release. Closes: #961801
+
+ -- Peter Pentchev <roam@debian.org>  Fri, 29 May 2020 19:35:39 +0300

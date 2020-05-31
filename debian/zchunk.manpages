@@ -1,0 +1,6 @@
+debian/unzck.1
+debian/zck.1
+debian/zck_delta_size.1
+debian/zck_gen_zdict.1
+debian/zck_read_header.1
+debian/zckdl.1

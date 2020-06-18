@@ -4,7 +4,7 @@
 DEB_BUILD_MAINT_OPTIONS=	hardening=+all
 export DEB_BUILD_MAINT_OPTIONS
 
-MARCH:=	$(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+GARCH:=	$(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
 
 %:
 	dh '$@'
@@ -13,8 +13,8 @@ override_dh_auto_configure:
 	dh_auto_configure -- -Dwith-openssl=disabled
 
 execute_after_dh_auto_test:
-	env PYTHONPATH=debian/tests python3 -B -m pychunk.roundtrip -d 'obj-${MARCH}/src' -f '/usr/share/dict/american-english'
-	env PYTHONPATH=debian/tests python3 -B -m pychunk.roundtrip -d 'obj-${MARCH}/src' -f "$$(readlink -f -- "$$(command -v gcc)")"
+	env PYTHONPATH=debian/tests python3 -B -m pychunk.roundtrip -d 'obj-${GARCH}/src' -f '/usr/share/dict/american-english'
+	env PYTHONPATH=debian/tests python3 -B -m pychunk.roundtrip -d 'obj-${GARCH}/src' -f "$$(readlink -f -- "$$(command -v gcc)")"
 
 override_dh_makeshlibs:
 	dh_makeshlibs -- -c4

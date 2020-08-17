@@ -4,7 +4,6 @@ Priority: optional
 Maintainer: RPM packaging team <team+pkg-rpm@tracker.debian.org>
 Uploaders: Peter Pentchev <roam@debian.org>
 Build-Depends:
- debhelper-compat (= 13),
  libcurl4-openssl-dev,
  libzstd-dev,
  meson,
